@@ -180,6 +180,65 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
   bot.match('🔍 Найти мастера', startSearch);
   bot.command('search', startSearch);
 
+  // Полная карточка мастера для клиента
+  bot.action(/^master_card:/, async (ctx) => {
+    const masterId = parseInt((ctx.callbackQuery!.data ?? '').replace('master_card:', ''));
+    await ctx.answerCallbackQuery();
+
+    const { data } = await db
+      .from('masters_profiles')
+      .select(`
+        name, price_from, photos,
+        districts(name),
+        sub_districts(name),
+        master_services(services(name))
+      `)
+      .eq('master_id', masterId)
+      .eq('bot_id', record.id)
+      .maybeSingle();
+
+    if (!data) return ctx.reply('Профиль не найден.');
+
+    const raw = data as Record<string, unknown>;
+    const districtName = (raw.districts as { name: string } | null)?.name ?? '';
+    const subDistrictName = (raw.sub_districts as { name: string } | null)?.name ?? '';
+    const location = subDistrictName
+      ? `${districtName} → ${subDistrictName}`
+      : districtName || '—';
+
+    const services = (raw.master_services as Array<{ services: { name: string } }> ?? [])
+      .map(ms => ms.services?.name)
+      .filter(Boolean)
+      .join(', ') || '—';
+
+    const text =
+      `👤 *${raw.name}*\n` +
+      `💼 ${services}\n` +
+      `📍 ${location}\n` +
+      `💰 от ${raw.price_from} грн`;
+
+    const keyboard = new InlineKeyboard()
+      .text('💬 Написать мастеру', `chat:${masterId}`);
+
+    const photos = raw.photos as string[];
+
+    if (photos && photos.length > 0) {
+      await ctx.replyWithMediaGroup(
+        photos.map((fileId: string, i: number) => ({
+          type: 'photo' as const,
+          media: fileId,
+          ...(i === 0 ? { caption: text, parse_mode: 'Markdown' as const } : {})
+        }))
+      );
+      await ctx.reply('👆 Контакт мастера:', { reply_markup: keyboard.toJSON() });
+    } else {
+      await ctx.reply(text, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard.toJSON()
+      });
+    }
+  });
+
   // Кнопка «Мой профиль»
   bot.match('👤 Мой профиль', async (ctx) => {
     const telegramId = ctx.message && 'from' in ctx.message

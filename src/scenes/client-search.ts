@@ -230,51 +230,21 @@ async function showMasters(
     return ctx.scene.leave();
   }
 
+  // Показываем список мастеров кнопками
+  const keyboard = new InlineKeyboard();
   for (const master of masters as Record<string, unknown>[]) {
-    const districtName = (master.districts as { name: string } | null)?.name ?? '';
-    const subDistrictName = (master.sub_districts as { name: string } | null)?.name ?? '';
-    const location = subDistrictName
-      ? `${districtName} → ${subDistrictName}`
-      : districtName || '—';
-
     const services = (master.master_services as Array<{ services: { name: string } }> ?? [])
       .map(ms => ms.services?.name)
       .filter(Boolean)
-      .join(', ') || '—';
+      .join(', ');
 
-    const text =
-      `👤 *${master.name}*\n` +
-      `💼 ${services}\n` +
-      `📍 ${location}\n` +
-      `💰 от ${master.price_from} грн`;
-
-    const keyboard = new InlineKeyboard()
-      .text('💬 Написать мастеру', `chat:${master.master_id}`);
-
-    const photos = master.photos as string[];
-
-    if (photos && photos.length > 0) {
-      await ctx.replyWithMediaGroup(
-        photos.map((fileId: string, i: number) => ({
-          type: 'photo' as const,
-          media: fileId,
-          ...(i === 0 ? { caption: text, parse_mode: 'Markdown' as const } : {})
-        }))
-      );
-      await ctx.reply('👆 Контакт мастера:', { reply_markup: keyboard.toJSON() });
-    } else {
-      await ctx.reply(text, {
-        parse_mode: 'Markdown',
-        reply_markup: keyboard.toJSON()
-      });
-    }
+    const label = `${master.name} · ${services} · от ${master.price_from} грн`;
+    keyboard.text(label, `master_card:${master.master_id}`).row();
   }
 
-  // Итоговое сообщение ПОСЛЕ карточек — клиент его видит внизу
   await ctx.reply(
-    `📋 *${serviceName}* · *${locationName}* · ${masters.length} мастеров\n\n` +
-    `🔄 Новый поиск — /search`,
-    { parse_mode: 'Markdown' }
+    `📋 *${serviceName}* · *${locationName}* · ${masters.length} мастеров\n\nВыберите мастера:`,
+    { parse_mode: 'Markdown', reply_markup: keyboard.toJSON() }
   );
 
   ctx.scene.leave();
