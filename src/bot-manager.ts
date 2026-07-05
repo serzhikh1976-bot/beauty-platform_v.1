@@ -13,6 +13,7 @@ import { createEditPriceScene } from './scenes/edit-price.js';
 import { createEditDistrictScene } from './scenes/edit-district.js';
 import { createEditServicesScene } from './scenes/edit-services.js';
 import { createEditPhotosScene } from './scenes/edit-photos.js';
+import { createClientSearchScene, getServicesWithMasters } from './scenes/client-search.js';
 import { getDistricts, buildListKeyboard } from './districts.js';
 
 const cache = new Map<string, TelegramBot<SceneContext>>();
@@ -80,7 +81,8 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     createEditPriceScene(record.id),
     createEditDistrictScene(record.id),
     createEditServicesScene(record.id),
-    createEditPhotosScene(record.id)
+    createEditPhotosScene(record.id),
+    createClientSearchScene(record.id)
   ]);
   bot.use(stage.middleware());
 
@@ -106,7 +108,14 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
       }
 
       if (data?.role === 'client') {
-        return ctx.reply(`👋 С возвращением в ${record.city_name}!\n\nИщите мастера? Скоро здесь появится поиск 🔍`);
+        const clientKeyboard = new ReplyKeyboard()
+          .text('🔍 Найти мастера')
+          .resized(true);
+
+        return ctx.replyWithKeyboard(
+          `👋 С возвращением в ${record.city_name}!`,
+          clientKeyboard
+        );
       }
     }
 
@@ -127,7 +136,15 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     const userId = ctx.callbackQuery!.from.id;
     await saveRole(record.id, userId, 'client');
     await ctx.answerCallbackQuery();
-    await ctx.reply('✅ Вы зарегистрированы как клиент.');
+
+    const clientKeyboard = new ReplyKeyboard()
+      .text('🔍 Найти мастера')
+      .resized(true);
+
+    await ctx.replyWithKeyboard(
+      '✅ Вы зарегистрированы как клиент.\n\nНажмите кнопку чтобы найти мастера:',
+      clientKeyboard
+    );
   });
 
   bot.action('role:master', async (ctx) => {
@@ -137,6 +154,31 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     await ctx.reply('Как вас зовут? Введите ваше имя:');
     ctx.scene.enter('master_registration');
   });
+
+  // Поиск мастеров (кнопка и команда)
+  const startSearch = async (ctx: SceneContext) => {
+    const services = await getServicesWithMasters(record.id);
+
+    if (services.length === 0) {
+      return ctx.reply('😔 Пока нет доступных мастеров. Загляните позже!');
+    }
+
+    const keyboard = new InlineKeyboard();
+    for (const s of services) {
+      keyboard.text(s.name, `search_svc:${s.id}`).row();
+    }
+
+    await ctx.reply(
+      '🔧 Какая услуга вам нужна?',
+      { reply_markup: keyboard.toJSON() }
+    );
+
+    ctx.scene.enter('client_search');
+    ctx.scene.state.services_list = services;
+  };
+
+  bot.match('🔍 Найти мастера', startSearch);
+  bot.command('search', startSearch);
 
   // Кнопка «Мой профиль»
   bot.match('👤 Мой профиль', async (ctx) => {
