@@ -71,7 +71,7 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
         (ctx.message && 'from' in ctx.message ? ctx.message.from?.id : undefined);
       const chatId = ctx.chatId;
       if (!userId || !chatId) return undefined;
-      return `${chatId}:${userId}`;
+      return `${record.id}:${chatId}:${userId}`;
     }
   }));
 
