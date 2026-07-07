@@ -239,6 +239,117 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     }
   });
 
+  // ── Анонимный чат ─────────────────────────────────────────────────────────
+
+  // Клиент нажимает «💬 Написать мастеру»
+  bot.action(/^chat:/, async (ctx) => {
+    const clientId = ctx.callbackQuery!.from.id;
+    const masterId = parseInt((ctx.callbackQuery!.data ?? '').replace('chat:', ''));
+    await ctx.answerCallbackQuery();
+
+    // Проверяем есть ли уже активный чат у клиента
+    const { data: existing } = await db
+      .from('active_chats')
+      .select('id, master_id, masters_profiles(name)')
+      .eq('client_id', clientId)
+      .eq('bot_id', record.id)
+      .eq('status', 'active')
+      .maybeSingle();
+
+    if (existing) {
+      const raw = existing as Record<string, unknown>;
+      const masterName = (raw.masters_profiles as { name: string } | null)?.name ?? 'мастером';
+      return ctx.reply(`У вас уже есть активный чат с *${masterName}*. Сначала завершите его.`, { parse_mode: 'Markdown' });
+    }
+
+    // Проверяем что мастер активен
+    const { data: master } = await db
+      .from('masters_profiles')
+      .select('name, is_active')
+      .eq('master_id', masterId)
+      .eq('bot_id', record.id)
+      .maybeSingle();
+
+    if (!master || !(master as Record<string, unknown>).is_active) {
+      return ctx.reply('Этот мастер сейчас недоступен.');
+    }
+
+    const masterName = (master as Record<string, unknown>).name as string;
+
+    // Создаём чат
+    const { data: chat, error } = await db
+      .from('active_chats')
+      .insert({
+        bot_id: record.id,
+        client_id: clientId,
+        master_id: masterId,
+        status: 'active',
+        updated_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+
+    if (error || !chat) {
+      return ctx.reply('Не удалось открыть чат. Попробуйте позже.');
+    }
+
+    const chatId = (chat as Record<string, unknown>).id as string;
+    const endKeyboard = new InlineKeyboard()
+      .text('❌ Завершить диалог', `end_chat:${chatId}`);
+
+    // Уведомляем клиента
+    await ctx.reply(
+      `💬 Чат с мастером *${masterName}* открыт!\n\nПишите ваш вопрос:`,
+      { parse_mode: 'Markdown', reply_markup: endKeyboard.toJSON() }
+    );
+
+    // Уведомляем мастера и сохраняем message_id для маппинга Reply
+    const notifMsg = await bot.sendMessage(
+      masterId,
+      `💬 Новый клиент хочет с вами пообщаться!\n\nОтвечайте Reply на сообщения клиента чтобы он вас видел.`,
+      { reply_markup: endKeyboard.toJSON() }
+    );
+
+    await db.from('chat_messages').insert({
+      chat_id: chatId,
+      message_id: notifMsg.message_id
+    });
+  });
+
+  // Завершение чата
+  bot.action(/^end_chat:/, async (ctx) => {
+    const userId = ctx.callbackQuery!.from.id;
+    const chatId = (ctx.callbackQuery!.data ?? '').replace('end_chat:', '');
+    await ctx.answerCallbackQuery();
+
+    const { data: chat } = await db
+      .from('active_chats')
+      .select('client_id, master_id, status')
+      .eq('id', chatId)
+      .maybeSingle();
+
+    if (!chat || (chat as Record<string, unknown>).status !== 'active') {
+      return ctx.reply('Чат уже завершён.');
+    }
+
+    const raw = chat as Record<string, unknown>;
+
+    await db
+      .from('active_chats')
+      .update({ status: 'finished' })
+      .eq('id', chatId);
+
+    // Уведомляем обоих
+    const msg = '✅ Диалог завершён.';
+    await ctx.reply(msg);
+
+    const otherId = userId === raw.client_id
+      ? raw.master_id as number
+      : raw.client_id as number;
+
+    await bot.sendMessage(otherId, msg);
+  });
+
   // Кнопка «Мой профиль»
   bot.match('👤 Мой профиль', async (ctx) => {
     const telegramId = ctx.message && 'from' in ctx.message
@@ -363,6 +474,119 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
 
     // Обновляем профиль
     await showMasterProfile(ctx, telegramId, record.id);
+  });
+
+  // Роутинг текстовых сообщений — чат или fallback
+  bot.on('text', async (ctx) => {
+    const userId = ctx.message && 'from' in ctx.message ? ctx.message.from?.id : undefined;
+    if (!userId) return;
+
+    const text = ctx.text ?? '';
+
+    // Клиент → ищем его активный чат
+    const { data: clientChat } = await db
+      .from('active_chats')
+      .select('id, master_id')
+      .eq('client_id', userId)
+      .eq('bot_id', record.id)
+      .eq('status', 'active')
+      .maybeSingle();
+
+    if (clientChat) {
+      const raw = clientChat as Record<string, unknown>;
+
+      // Берём имя клиента из Telegram
+      const fromMsg = ctx.message && 'from' in ctx.message ? ctx.message.from : undefined;
+      const clientName = fromMsg?.username
+        ? `@${fromMsg.username}`
+        : fromMsg?.first_name ?? 'Клиент';
+
+      const sentMsg = await bot.sendMessage(
+        raw.master_id as number,
+        `💬 *${clientName}:* ${text}`,
+        { parse_mode: 'Markdown' }
+      );
+
+      await db.from('chat_messages').insert({
+        chat_id: raw.id,
+        message_id: sentMsg.message_id
+      });
+
+      await db.from('active_chats')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', raw.id);
+      return;
+    }
+
+    // Мастер → проверяем его активные чаты
+    const msg = ctx.message as unknown as Record<string, unknown>;
+    const replyToId = (msg?.reply_to_message as Record<string, unknown> | undefined)
+      ?.message_id as number | undefined;
+
+    const { data: masterChats } = await db
+      .from('active_chats')
+      .select('id, client_id')
+      .eq('master_id', userId)
+      .eq('bot_id', record.id)
+      .eq('status', 'active');
+
+    if (masterChats && masterChats.length > 0) {
+      let targetChat: Record<string, unknown> | null = null;
+
+      // Если есть Reply — ищем чат по message_id
+      if (replyToId) {
+        const { data: chatMsg } = await db
+          .from('chat_messages')
+          .select('chat_id, active_chats(id, client_id, status)')
+          .eq('message_id', replyToId)
+          .maybeSingle();
+
+        const found = (chatMsg as Record<string, unknown> | null)
+          ?.active_chats as Record<string, unknown> | null;
+
+        if (found?.status === 'active') {
+          targetChat = found;
+        }
+      }
+
+      // Если один активный чат — маршрутизируем напрямую (Reply не обязателен)
+      if (!targetChat && masterChats.length === 1) {
+        targetChat = masterChats[0] as Record<string, unknown>;
+      }
+
+      if (targetChat) {
+        // Берём имя мастера из профиля
+        const { data: masterProfile } = await db
+          .from('masters_profiles')
+          .select('name')
+          .eq('master_id', userId)
+          .eq('bot_id', record.id)
+          .maybeSingle();
+
+        const masterName = (masterProfile as { name: string } | null)?.name ?? 'Мастер';
+
+        await bot.sendMessage(
+          (targetChat as Record<string, unknown>).client_id as number,
+          `💼 *${masterName}:* ${text}`,
+          { parse_mode: 'Markdown' }
+        );
+        await db.from('active_chats')
+          .update({ updated_at: new Date().toISOString() })
+          .eq('id', targetChat.id);
+        return;
+      }
+
+      // Несколько чатов — просим использовать Reply
+      await ctx.reply(
+        '💬 У вас несколько активных чатов.\n' +
+        'Используйте кнопку *Reply* на сообщении клиента чтобы ответить именно ему.',
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    // Нет активного чата — fallback
+    await ctx.reply('Не понимаю эту команду 🤔\n/help — список команд');
   });
 
   return bot;
