@@ -495,11 +495,8 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     if (clientChat) {
       const raw = clientChat as Record<string, unknown>;
 
-      // Берём имя клиента из Telegram
       const fromMsg = ctx.message && 'from' in ctx.message ? ctx.message.from : undefined;
-      const clientName = fromMsg?.username
-        ? `@${fromMsg.username}`
-        : fromMsg?.first_name ?? 'Клиент';
+      const clientName = fromMsg?.first_name ?? 'Клиент';
 
       const sentMsg = await bot.sendMessage(
         raw.master_id as number,
