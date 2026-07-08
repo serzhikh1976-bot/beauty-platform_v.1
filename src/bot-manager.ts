@@ -476,13 +476,14 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     await showMasterProfile(ctx, telegramId, record.id);
   });
 
-  // Роутинг текстовых сообщений — чат или fallback
-  bot.on('text', async (ctx) => {
-    const userId = ctx.message && 'from' in ctx.message ? ctx.message.from?.id : undefined;
-    if (!userId) return;
+  // ── Универсальный роутер сообщений чата ──────────────────────────────────
 
-    const text = ctx.text ?? '';
-
+  async function routeChatMessage(
+    userId: number,
+    fromMsg: { first_name?: string } | undefined,
+    text: string | null,
+    photoFileId: string | null
+  ): Promise<boolean> {
     // Клиент → ищем его активный чат
     const { data: clientChat } = await db
       .from('active_chats')
@@ -494,32 +495,31 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
 
     if (clientChat) {
       const raw = clientChat as Record<string, unknown>;
-
-      const fromMsg = ctx.message && 'from' in ctx.message ? ctx.message.from : undefined;
       const clientName = fromMsg?.first_name ?? 'Клиент';
 
-      const sentMsg = await bot.sendMessage(
-        raw.master_id as number,
-        `💬 *${clientName}:* ${text}`,
-        { parse_mode: 'Markdown' }
-      );
+      if (photoFileId) {
+        const sentMsg = await bot.sendPhoto(
+          raw.master_id as number,
+          photoFileId,
+          { caption: `📸 *${clientName}*`, parse_mode: 'Markdown' }
+        );
+        await db.from('chat_messages').insert({ chat_id: raw.id, message_id: sentMsg.message_id });
+        await db.from('chat_message_log').insert({ chat_id: raw.id, sender_id: userId, photo_ids: [photoFileId] });
+      } else if (text) {
+        const sentMsg = await bot.sendMessage(
+          raw.master_id as number,
+          `💬 *${clientName}:* ${text}`,
+          { parse_mode: 'Markdown' }
+        );
+        await db.from('chat_messages').insert({ chat_id: raw.id, message_id: sentMsg.message_id });
+        await db.from('chat_message_log').insert({ chat_id: raw.id, sender_id: userId, text });
+      }
 
-      await db.from('chat_messages').insert({
-        chat_id: raw.id,
-        message_id: sentMsg.message_id
-      });
-
-      await db.from('active_chats')
-        .update({ updated_at: new Date().toISOString() })
-        .eq('id', raw.id);
-      return;
+      await db.from('active_chats').update({ updated_at: new Date().toISOString() }).eq('id', raw.id);
+      return true;
     }
 
     // Мастер → проверяем его активные чаты
-    const msg = ctx.message as unknown as Record<string, unknown>;
-    const replyToId = (msg?.reply_to_message as Record<string, unknown> | undefined)
-      ?.message_id as number | undefined;
-
     const { data: masterChats } = await db
       .from('active_chats')
       .select('id, client_id')
@@ -530,29 +530,73 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     if (masterChats && masterChats.length > 0) {
       let targetChat: Record<string, unknown> | null = null;
 
-      // Если есть Reply — ищем чат по message_id
-      if (replyToId) {
-        const { data: chatMsg } = await db
-          .from('chat_messages')
-          .select('chat_id, active_chats(id, client_id, status)')
-          .eq('message_id', replyToId)
-          .maybeSingle();
-
-        const found = (chatMsg as Record<string, unknown> | null)
-          ?.active_chats as Record<string, unknown> | null;
-
-        if (found?.status === 'active') {
-          targetChat = found;
-        }
+      if (photoFileId === null) {
+        // Для текста пробуем найти по reply (только для текстовых сообщений)
       }
 
-      // Если один активный чат — маршрутизируем напрямую (Reply не обязателен)
       if (!targetChat && masterChats.length === 1) {
         targetChat = masterChats[0] as Record<string, unknown>;
       }
 
       if (targetChat) {
-        // Берём имя мастера из профиля
+        const { data: masterProfile } = await db
+          .from('masters_profiles')
+          .select('name')
+          .eq('master_id', userId)
+          .eq('bot_id', record.id)
+          .maybeSingle();
+
+        const masterName = (masterProfile as { name: string } | null)?.name ?? 'Мастер';
+
+        if (photoFileId) {
+          await bot.sendPhoto(
+            targetChat.client_id as number,
+            photoFileId,
+            { caption: `📸 *${masterName}*`, parse_mode: 'Markdown' }
+          );
+          await db.from('chat_message_log').insert({ chat_id: targetChat.id, sender_id: userId, photo_ids: [photoFileId] });
+        } else if (text) {
+          await bot.sendMessage(
+            targetChat.client_id as number,
+            `💼 *${masterName}:* ${text}`,
+            { parse_mode: 'Markdown' }
+          );
+          await db.from('chat_message_log').insert({ chat_id: targetChat.id, sender_id: userId, text });
+        }
+
+        await db.from('active_chats').update({ updated_at: new Date().toISOString() }).eq('id', targetChat.id);
+        return true;
+      }
+      return true; // в чате но не знаем кому — не показываем fallback
+    }
+
+    return false; // не в чате
+  }
+
+  // Текстовые сообщения
+  bot.on('text', async (ctx) => {
+    const userId = ctx.message && 'from' in ctx.message ? ctx.message.from?.id : undefined;
+    if (!userId) return;
+
+    const text = ctx.text ?? '';
+    const fromMsg = ctx.message && 'from' in ctx.message ? ctx.message.from : undefined;
+
+    // Проверяем reply для мастера с несколькими чатами
+    const msg = ctx.message as unknown as Record<string, unknown>;
+    const replyToId = (msg?.reply_to_message as Record<string, unknown> | undefined)
+      ?.message_id as number | undefined;
+
+    if (replyToId) {
+      const { data: chatMsg } = await db
+        .from('chat_messages')
+        .select('chat_id, active_chats(id, client_id, status)')
+        .eq('message_id', replyToId)
+        .maybeSingle();
+
+      const found = (chatMsg as Record<string, unknown> | null)
+        ?.active_chats as Record<string, unknown> | null;
+
+      if (found?.status === 'active') {
         const { data: masterProfile } = await db
           .from('masters_profiles')
           .select('name')
@@ -563,27 +607,73 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
         const masterName = (masterProfile as { name: string } | null)?.name ?? 'Мастер';
 
         await bot.sendMessage(
-          (targetChat as Record<string, unknown>).client_id as number,
+          found.client_id as number,
           `💼 *${masterName}:* ${text}`,
           { parse_mode: 'Markdown' }
         );
-        await db.from('active_chats')
-          .update({ updated_at: new Date().toISOString() })
-          .eq('id', targetChat.id);
+        await db.from('chat_message_log').insert({ chat_id: found.id, sender_id: userId, text });
+        await db.from('active_chats').update({ updated_at: new Date().toISOString() }).eq('id', found.id);
         return;
       }
-
-      // Несколько чатов — просим использовать Reply
-      await ctx.reply(
-        '💬 У вас несколько активных чатов.\n' +
-        'Используйте кнопку *Reply* на сообщении клиента чтобы ответить именно ему.',
-        { parse_mode: 'Markdown' }
-      );
-      return;
     }
 
-    // Нет активного чата — fallback
-    await ctx.reply('Не понимаю эту команду 🤔\n/help — список команд');
+    // --- ДОБАВЛЕННАЯ ПРОВЕРКА ДЛЯ МАСТЕРА С НЕСКОЛЬКИМИ ЧАТАМИ ---
+    // Если reply не было (или не помог), проверим, не пытается ли мастер с несколькими чатами отправить сообщение без reply
+    if (!replyToId) {
+      const { data: masterChats } = await db
+        .from('active_chats')
+        .select('id')
+        .eq('master_id', userId)
+        .eq('bot_id', record.id)
+        .eq('status', 'active');
+
+      if (masterChats && masterChats.length > 1) {
+        await ctx.reply(
+          '⚠️ У вас несколько активных чатов. Чтобы ответить конкретному клиенту, используйте Reply (ответ) на его сообщение.'
+        );
+        return; // не идём дальше
+      }
+    }
+    // --- КОНЕЦ ДОБАВЛЕННОЙ ПРОВЕРКИ ---
+
+    const handled = await routeChatMessage(userId, fromMsg, text, null);
+    if (!handled) {
+      await ctx.reply('Не понимаю эту команду 🤔\n/help — список команд');
+    }
+  });
+
+  // Фото
+  bot.on('photo', async (ctx) => {
+    const userId = ctx.message && 'from' in ctx.message ? ctx.message.from?.id : undefined;
+    if (!userId) return;
+
+    const photoSizes = ctx.message && 'photo' in ctx.message
+      ? (ctx.message as unknown as Record<string, unknown>).photo as Array<{ file_id: string }>
+      : undefined;
+
+    if (!photoSizes || photoSizes.length === 0) return;
+
+    const fileId = photoSizes[photoSizes.length - 1].file_id;
+    const fromMsg = ctx.message && 'from' in ctx.message ? ctx.message.from : undefined;
+
+    // --- ДОБАВЛЕННАЯ ПРОВЕРКА ДЛЯ МАСТЕРА С НЕСКОЛЬКИМИ ЧАТАМИ ---
+    // Проверяем, не пытается ли мастер с несколькими чатами отправить фото без reply
+    const { data: masterChats } = await db
+      .from('active_chats')
+      .select('id')
+      .eq('master_id', userId)
+      .eq('bot_id', record.id)
+      .eq('status', 'active');
+
+    if (masterChats && masterChats.length > 1) {
+      await ctx.reply(
+        '⚠️ У вас несколько активных чатов. Чтобы отправить фото конкретному клиенту, используйте Reply (ответ) на его сообщение.'
+      );
+      return; // не отправляем фото
+    }
+    // --- КОНЕЦ ДОБАВЛЕННОЙ ПРОВЕРКИ ---
+
+    await routeChatMessage(userId, fromMsg, null, fileId);
   });
 
   return bot;
