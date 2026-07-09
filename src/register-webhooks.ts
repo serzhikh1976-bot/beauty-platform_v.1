@@ -15,21 +15,40 @@ if (error) throw new Error(`Ошибка БД: ${error.message}`);
 const bots = (data as BotRecord[]) ?? [];
 if (bots.length === 0) {
   console.log('Активных ботов не найдено.');
-  process.exit(0);
+} else {
+  console.log(`Регистрирую вебхуки для ${bots.length} ботов...`);
+
+  for (const bot of bots) {
+    const url = `${BASE_URL}/webhook/${bot.number}`;
+    try {
+      const instance = new TelegramBot(new NodeApiClient(bot.token));
+      await instance.setWebhook(url, {
+        drop_pending_updates: true,
+        allowed_updates: ['message', 'callback_query']
+      });
+      console.log(`✅ ${bot.city_name} → ${url}`);
+    } catch (err) {
+      console.error(`❌ ${bot.city_name}:`, err);
+    }
+  }
 }
 
-console.log(`Регистрирую вебхуки для ${bots.length} ботов...`);
+// Админ-бот — отдельно, не из таблицы bots
+const adminToken = process.env.ADMIN_BOT_TOKEN;
+const adminUuid = process.env.ADMIN_BOT_UUID;
 
-for (const bot of bots) {
-  const url = `${BASE_URL}/webhook/${bot.number}`;
+if (adminToken && adminUuid) {
+  const url = `${BASE_URL}/webhook/${adminUuid}`;
   try {
-    const instance = new TelegramBot(new NodeApiClient(bot.token));
-    await instance.setWebhook(url, {
+    const adminInstance = new TelegramBot(new NodeApiClient(adminToken));
+    await adminInstance.setWebhook(url, {
       drop_pending_updates: true,
       allowed_updates: ['message', 'callback_query']
     });
-    console.log(`✅ ${bot.city_name} → ${url}`);
+    console.log(`✅ Admin-бот → ${url}`);
   } catch (err) {
-    console.error(`❌ ${bot.city_name}:`, err);
+    console.error('❌ Admin-бот:', err);
   }
+} else {
+  console.log('ℹ️  ADMIN_BOT_TOKEN / ADMIN_BOT_UUID не заданы — вебхук админ-бота не регистрируется.');
 }
