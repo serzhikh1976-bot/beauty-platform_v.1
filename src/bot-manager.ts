@@ -323,9 +323,43 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
   });
 
   // Завершение чата
+  // Шаг 1: просим подтверждение вместо мгновенного завершения —
+  // защита от случайного нажатия
   bot.action(/^end_chat:/, async (ctx) => {
-    const userId = ctx.callbackQuery!.from.id;
     const chatId = (ctx.callbackQuery!.data ?? '').replace('end_chat:', '');
+    await ctx.answerCallbackQuery();
+
+    const confirmKeyboard = new InlineKeyboard()
+      .text('✅ Да, завершить', `end_chat_confirm:${chatId}`)
+      .text('↩️ Отмена', `end_chat_cancel:${chatId}`);
+
+    const msg = ctx.callbackQuery!.message;
+    if (msg) {
+      await bot.editMessageReplyMarkup(
+        { chat_id: msg.chat.id, message_id: msg.message_id },
+        { reply_markup: confirmKeyboard.toJSON() }
+      );
+    }
+  });
+
+  // Отмена — возвращаем обычную кнопку "Завершить диалог"
+  bot.action(/^end_chat_cancel:/, async (ctx) => {
+    const chatId = (ctx.callbackQuery!.data ?? '').replace('end_chat_cancel:', '');
+    await ctx.answerCallbackQuery('Отменено');
+
+    const msg = ctx.callbackQuery!.message;
+    if (msg) {
+      await bot.editMessageReplyMarkup(
+        { chat_id: msg.chat.id, message_id: msg.message_id },
+        { reply_markup: endChatKeyboard(chatId).toJSON() }
+      );
+    }
+  });
+
+  // Шаг 2: подтверждено — завершаем по-настоящему
+  bot.action(/^end_chat_confirm:/, async (ctx) => {
+    const userId = ctx.callbackQuery!.from.id;
+    const chatId = (ctx.callbackQuery!.data ?? '').replace('end_chat_confirm:', '');
     await ctx.answerCallbackQuery();
 
     const { data: chat } = await db
