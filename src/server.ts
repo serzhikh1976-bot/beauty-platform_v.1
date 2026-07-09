@@ -2,9 +2,12 @@ import Fastify from 'fastify';
 import type { Update } from 'ultra-telegram-framework';
 import { getBot, cacheSize } from './bot-manager.js';
 import { getAdminBot, getAdminBotUuid } from './admin-bot.js';
+import { registerAdminWeb } from './admin-web.js';
 
-export function buildServer() {
+export async function buildServer() {
   const app = Fastify({ logger: false });
+
+  await registerAdminWeb(app);
 
   // Health check — для Railway/VPS и проверки что сервер жив
   app.get('/', async () => ({
