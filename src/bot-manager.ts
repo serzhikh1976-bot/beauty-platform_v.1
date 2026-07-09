@@ -519,6 +519,24 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
 
   // ── Универсальный роутер сообщений чата ──────────────────────────────────
 
+  // Если сообщение не попало ни в один активный чат: зарегистрированному
+  // клиенту/мастеру говорим "нет активных чатов", а не "не понимаю команду" —
+  // это два разных по смыслу случая.
+  async function noActiveChatMessage(userId: number): Promise<string> {
+    const { data: userRow } = await db
+      .from('users')
+      .select('role')
+      .eq('bot_id', record.id)
+      .eq('telegram_id', userId)
+      .maybeSingle();
+
+    if ((userRow as { role: string } | null)?.role) {
+      return '💬 У вас нет активных чатов.';
+    }
+
+    return 'Не понимаю эту команду 🤔\n/help — список команд';
+  }
+
   async function routeChatMessage(
     userId: number,
     fromMsg: { first_name?: string } | undefined,
@@ -701,7 +719,7 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
 
     const handled = await routeChatMessage(userId, fromMsg, text, null);
     if (!handled) {
-      await ctx.reply('Не понимаю эту команду 🤔\n/help — список команд');
+      await ctx.reply(await noActiveChatMessage(userId));
     }
   });
 
@@ -736,7 +754,10 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     }
     // --- КОНЕЦ ДОБАВЛЕННОЙ ПРОВЕРКИ ---
 
-    await routeChatMessage(userId, fromMsg, null, fileId);
+    const handled = await routeChatMessage(userId, fromMsg, null, fileId);
+    if (!handled) {
+      await ctx.reply(await noActiveChatMessage(userId));
+    }
   });
 
   return bot;
