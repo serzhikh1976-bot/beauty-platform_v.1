@@ -199,15 +199,24 @@ async function handleChatDetail(request: FastifyRequest, reply: FastifyReply) {
   const masterId = chat.master_id as number;
   const cityName = (chat.bots as { city_name: string } | null)?.city_name ?? '—';
 
-  const [{ data: masterProfile }, { data: logsRaw }, { data: botRow }] = await Promise.all([
+  const [{ data: masterProfile }, { data: logsRaw }, { data: botRow }, { data: banRow }] = await Promise.all([
     db.from('masters_profiles').select('name').eq('master_id', masterId).eq('bot_id', botId).maybeSingle(),
     db
       .from('chat_message_log')
       .select('sender_id, text, photo_ids, created_at')
       .eq('chat_id', chatId)
       .order('created_at', { ascending: true }),
-    db.from('bots').select('token').eq('id', botId).maybeSingle()
+    db.from('bots').select('token').eq('id', botId).maybeSingle(),
+    db
+      .from('blocked_clients')
+      .select('id, created_at')
+      .eq('bot_id', botId)
+      .eq('master_id', masterId)
+      .eq('client_id', clientId)
+      .maybeSingle()
   ]);
+
+  const ban = banRow as { id: number; created_at: string } | null;
 
   const masterName = (masterProfile as { name: string } | null)?.name ?? 'мастер';
   const messages = (logsRaw as Array<{ sender_id: number; text: string | null; photo_ids: string[] | null; created_at: string }>) ?? [];
@@ -252,9 +261,20 @@ async function handleChatDetail(request: FastifyRequest, reply: FastifyReply) {
     })
     .join('');
 
+  const banBanner = ban
+    ? `<div class="card ban-banner">
+        🚫 Мастер забанил этого клиента ${timeAgo(ban.created_at)}.
+        <form method="POST" action="/admin/bans/${ban.id}/unban" style="display:inline;">
+          <input type="hidden" name="redirect" value="/admin/chats/${chatId}" />
+          <button type="submit">Разбанить</button>
+        </form>
+      </div>`
+    : '';
+
   const body = `
     <div class="breadcrumb"><a href="/admin/chats">← Все чаты</a></div>
     <h1 style="margin-top:0;">${escapeHtml(cityName)}: ${escapeHtml(clientName)} ↔ ${escapeHtml(masterName)}</h1>
+    ${banBanner}
     <div class="card" style="margin-bottom:16px;">
       ${statusBadge(chat.status as string)}
       <span style="color:#888;font-size:13px;margin-left:8px;">
@@ -370,6 +390,86 @@ async function handleClientsList(request: FastifyRequest, reply: FastifyReply) {
   reply.type('text/html').send(layout('Клиенты', body, { activePath: '/admin/clients' }));
 }
 
+// ── Баны ─────────────────────────────────────────────────────────────────
+
+async function handleBansList(request: FastifyRequest, reply: FastifyReply) {
+  if (!requireAuth(request, reply)) return;
+
+  const { data: bansRaw, error } = await db
+    .from('blocked_clients')
+    .select('id, bot_id, master_id, client_id, created_at, bots(city_name)')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('[AdminChats] Ошибка загрузки blocked_clients:', error.message);
+    return reply.type('text/html').send(layout('Баны', '<div class="card">⚠️ Ошибка загрузки данных.</div>', { activePath: '/admin/bans' }));
+  }
+
+  const bans = (bansRaw as Array<Record<string, unknown>>) ?? [];
+
+  const masterIds = [...new Set(bans.map((b) => b.master_id as number))];
+  const masterNameByKey = new Map<string, string>();
+  if (masterIds.length > 0) {
+    const { data: mastersRaw } = await db.from('masters_profiles').select('master_id, bot_id, name').in('master_id', masterIds);
+    for (const m of (mastersRaw as Array<{ master_id: number; bot_id: number; name: string }>) ?? []) {
+      masterNameByKey.set(`${m.bot_id}:${m.master_id}`, m.name);
+    }
+  }
+
+  const tableBody = bans
+    .map((b) => {
+      const cityName = (b.bots as { city_name: string } | null)?.city_name ?? '—';
+      const masterName = masterNameByKey.get(`${b.bot_id}:${b.master_id}`) ?? '—';
+      return `
+    <tr>
+      <td>${escapeHtml(cityName)}</td>
+      <td>${escapeHtml(masterName)} · <code>${b.master_id}</code></td>
+      <td><code>${b.client_id}</code></td>
+      <td>${timeAgo(b.created_at as string)}</td>
+      <td><a class="link" href="/admin/chats?city=${b.bot_id}&client=${b.client_id}&master=${b.master_id}">Переписка →</a></td>
+      <td>
+        <form method="POST" action="/admin/bans/${b.id}/unban">
+          <input type="hidden" name="redirect" value="/admin/bans" />
+          <button type="submit">Разбанить</button>
+        </form>
+      </td>
+    </tr>`;
+    })
+    .join('');
+
+  const body = `
+    <h1 style="margin-top:0;">Баны (${bans.length})</h1>
+    ${
+      bans.length === 0
+        ? '<div class="card empty">Банов пока нет.</div>'
+        : `<div class="card" style="overflow-x:auto;">
+          <table>
+            <thead><tr><th>Город</th><th>Мастер</th><th>Клиент</th><th>Когда</th><th></th><th></th></tr></thead>
+            <tbody>${tableBody}</tbody>
+          </table>
+        </div>`
+    }
+  `;
+
+  reply.type('text/html').send(layout('Баны', body, { activePath: '/admin/bans' }));
+}
+
+async function handleUnban(request: FastifyRequest, reply: FastifyReply) {
+  if (!requireAuth(request, reply)) return;
+
+  const { banId } = request.params as { banId: string };
+  const body = request.body as { redirect?: string };
+  const redirectTo = body.redirect && body.redirect.startsWith('/admin') ? body.redirect : '/admin/bans';
+
+  const { error } = await db.from('blocked_clients').delete().eq('id', Number(banId));
+
+  if (error) {
+    console.error('[AdminChats] Ошибка удаления бана:', error.message);
+  }
+
+  reply.redirect(redirectTo);
+}
+
 // ── Регистрация роутов ──────────────────────────────────────────────────
 
 export function registerAdminChatsRoutes(app: FastifyInstance): void {
@@ -377,4 +477,6 @@ export function registerAdminChatsRoutes(app: FastifyInstance): void {
   app.get('/admin/chats/:chatId', handleChatDetail);
   app.get('/admin/photo/:botId/:fileId', handlePhotoProxy);
   app.get('/admin/clients', handleClientsList);
+  app.get('/admin/bans', handleBansList);
+  app.post('/admin/bans/:banId/unban', handleUnban);
 }

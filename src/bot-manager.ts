@@ -63,6 +63,13 @@ const masterKeyboard = new ReplyKeyboard()
 const endChatKeyboard = (chatId: string) =>
   new InlineKeyboard().text('❌ Завершить диалог', `end_chat:${chatId}`);
 
+// То же самое, но с кнопкой бана — показывается только мастеру
+// (клиент не может банить мастера, поэтому у него только End)
+const masterActionsKeyboard = (chatId: string) =>
+  new InlineKeyboard()
+    .text('❌ Завершить диалог', `end_chat:${chatId}`)
+    .text('🚫 Забанить', `ban_client:${chatId}`);
+
 function createBot(record: BotRecord): TelegramBot<SceneContext> {
   const bot = new TelegramBot<SceneContext>(new NodeApiClient(record.token));
 
@@ -281,6 +288,19 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
       return ctx.reply('Этот мастер сейчас недоступен.');
     }
 
+    // Проверяем не забанил ли мастер этого клиента
+    const { data: blocked } = await db
+      .from('blocked_clients')
+      .select('id')
+      .eq('bot_id', record.id)
+      .eq('master_id', masterId)
+      .eq('client_id', clientId)
+      .maybeSingle();
+
+    if (blocked) {
+      return ctx.reply('🚫 Вы больше не можете писать этому мастеру.');
+    }
+
     const masterName = (master as Record<string, unknown>).name as string;
 
     // Создаём чат
@@ -302,6 +322,7 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
 
     const chatId = (chat as Record<string, unknown>).id as string;
     const endKeyboard = endChatKeyboard(chatId);
+    const masterKeyboardWithBan = masterActionsKeyboard(chatId);
 
     // Уведомляем клиента
     await ctx.reply(
@@ -313,7 +334,7 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     const notifMsg = await bot.sendMessage(
       masterId,
       `💬 Новый клиент хочет с вами пообщаться!\n\nОтвечайте Reply на сообщения клиента чтобы он вас видел.`,
-      { reply_markup: endKeyboard.toJSON() }
+      { reply_markup: masterKeyboardWithBan.toJSON() }
     );
 
     await db.from('chat_messages').insert({
@@ -423,6 +444,91 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
       : `✅ Диалог с *${masterName}* завершён.`;
 
     await bot.sendMessage(otherId, otherMsg, { parse_mode: 'Markdown' });
+  });
+
+  // Бан клиента мастером
+  // Шаг 1: просим подтверждение — действие серьёзное и необратимое
+  bot.action(/^ban_client:/, async (ctx) => {
+    const chatId = (ctx.callbackQuery!.data ?? '').replace('ban_client:', '');
+    await ctx.answerCallbackQuery();
+
+    const confirmKeyboard = new InlineKeyboard()
+      .text('🚫 Да, забанить', `ban_client_confirm:${chatId}`)
+      .text('↩️ Отмена', `ban_client_cancel:${chatId}`);
+
+    const msg = ctx.callbackQuery!.message;
+    if (msg) {
+      await bot.editMessageReplyMarkup(
+        { chat_id: msg.chat.id, message_id: msg.message_id },
+        { reply_markup: confirmKeyboard.toJSON() }
+      );
+    }
+  });
+
+  // Отмена — возвращаем обычные кнопки мастера
+  bot.action(/^ban_client_cancel:/, async (ctx) => {
+    const chatId = (ctx.callbackQuery!.data ?? '').replace('ban_client_cancel:', '');
+    await ctx.answerCallbackQuery('Отменено');
+
+    const msg = ctx.callbackQuery!.message;
+    if (msg) {
+      await bot.editMessageReplyMarkup(
+        { chat_id: msg.chat.id, message_id: msg.message_id },
+        { reply_markup: masterActionsKeyboard(chatId).toJSON() }
+      );
+    }
+  });
+
+  // Шаг 2: подтверждено — баним по-настоящему
+  bot.action(/^ban_client_confirm:/, async (ctx) => {
+    const userId = ctx.callbackQuery!.from.id;
+    const chatId = (ctx.callbackQuery!.data ?? '').replace('ban_client_confirm:', '');
+    await ctx.answerCallbackQuery();
+
+    const { data: chat } = await db
+      .from('active_chats')
+      .select('client_id, master_id, status')
+      .eq('id', chatId)
+      .eq('bot_id', record.id)
+      .maybeSingle();
+
+    if (!chat) {
+      return ctx.reply('Чат не найден.');
+    }
+
+    const raw = chat as Record<string, unknown>;
+    const clientId = raw.client_id as number;
+    const masterId = raw.master_id as number;
+
+    // Банить может только сам мастер этого чата
+    if (userId !== masterId) {
+      return;
+    }
+
+    // Если чат ещё активен — заодно завершаем его
+    if (raw.status === 'active') {
+      await db
+        .from('active_chats')
+        .update({ status: 'finished' })
+        .eq('id', chatId)
+        .eq('bot_id', record.id);
+    }
+
+    // Записываем бан. Если пара уже забанена (повторный клик, гонка) —
+    // просто игнорируем конфликт уникальности.
+    const { error: banError } = await db.from('blocked_clients').insert({
+      bot_id: record.id,
+      master_id: masterId,
+      client_id: clientId
+    });
+
+    if (banError && banError.code !== '23505') {
+      console.error(`[${record.city_name}] Ошибка записи бана:`, banError.message);
+      return ctx.reply('⚠️ Не удалось забанить клиента. Попробуйте ещё раз.');
+    }
+
+    await ctx.reply('🚫 Клиент забанен. Он больше не сможет вам писать.');
+    await bot.sendMessage(clientId, '🚫 Мастер ограничил переписку с вами. Вы больше не можете писать этому мастеру.');
   });
 
   // Кнопка «Мой профиль»
@@ -597,7 +703,7 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
           {
             caption: `📸 *${clientName}*`,
             parse_mode: 'Markdown',
-            reply_markup: endChatKeyboard(raw.id as string).toJSON()
+            reply_markup: masterActionsKeyboard(raw.id as string).toJSON()
           }
         );
         await db.from('chat_messages').insert({ chat_id: raw.id, message_id: sentMsg.message_id });
@@ -608,7 +714,7 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
           `💬 *${clientName}:* ${text}`,
           {
             parse_mode: 'Markdown',
-            reply_markup: endChatKeyboard(raw.id as string).toJSON()
+            reply_markup: masterActionsKeyboard(raw.id as string).toJSON()
           }
         );
         await db.from('chat_messages').insert({ chat_id: raw.id, message_id: sentMsg.message_id });

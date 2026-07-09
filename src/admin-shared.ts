@@ -43,7 +43,8 @@ export function requireAuth(request: FastifyRequest, reply: FastifyReply): boole
 const NAV_ITEMS: Array<{ href: string; label: string }> = [
   { href: '/admin', label: 'Мастера' },
   { href: '/admin/chats', label: 'Чаты' },
-  { href: '/admin/clients', label: 'Клиенты' }
+  { href: '/admin/clients', label: 'Клиенты' },
+  { href: '/admin/bans', label: 'Баны' }
 ];
 
 export function layout(
@@ -106,6 +107,9 @@ export function layout(
   .msg .photos { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
   .msg .photos a { display: block; width: 160px; height: 160px; border-radius: 8px; overflow: hidden; }
   .msg .photos img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .ban-banner { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .ban-banner button { background: #991b1b; }
+  .ban-banner button:hover { background: #7f1d1d; }
 </style>
 </head>
 <body>
