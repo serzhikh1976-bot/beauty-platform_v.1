@@ -4,6 +4,7 @@ import formbodyPlugin from '@fastify/formbody';
 import { db } from './db.js';
 import { escapeHtml, isAuthed, layout, loginPage, requireAuth, safeEqual, SESSION_COOKIE } from './admin-shared.js';
 import { registerAdminChatsRoutes } from './admin-chats.js';
+import { registerAdminSettingsRoutes } from './admin-settings.js';
 
 interface MasterRow {
   masterId: number;
@@ -231,4 +232,5 @@ export async function registerAdminWeb(app: FastifyInstance): Promise<void> {
   });
 
   registerAdminChatsRoutes(app);
+  registerAdminSettingsRoutes(app);
 }

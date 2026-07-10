@@ -44,7 +44,10 @@ const NAV_ITEMS: Array<{ href: string; label: string }> = [
   { href: '/admin', label: 'Мастера' },
   { href: '/admin/chats', label: 'Чаты' },
   { href: '/admin/clients', label: 'Клиенты' },
-  { href: '/admin/bans', label: 'Баны' }
+  { href: '/admin/bans', label: 'Баны' },
+  { href: '/admin/bots', label: 'Боты' },
+  { href: '/admin/services', label: 'Услуги' },
+  { href: '/admin/districts', label: 'Районы' }
 ];
 
 export function layout(
