@@ -937,6 +937,15 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
       const found = (chatMsg as Record<string, unknown> | null)
         ?.active_chats as Record<string, unknown> | null;
 
+      // Нашли, на какой чат отвечает мастер через Reply, но этот чат уже
+      // не активен — явно говорим об этом и НЕ проваливаемся дальше в
+      // авто-роутинг (иначе сообщение молча улетит в другой, случайно
+      // оставшийся активным чат, а мастер даже не узнает об этом)
+      if (found && found.status !== 'active') {
+        await ctx.reply('⚠️ Этот диалог уже завершён. Сообщение не отправлено.');
+        return;
+      }
+
       if (found?.status === 'active') {
         const { data: masterProfile } = await db
           .from('masters_profiles')
