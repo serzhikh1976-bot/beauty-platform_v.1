@@ -73,6 +73,41 @@ const masterActionsKeyboard = (chatId: string) =>
 function createBot(record: BotRecord): TelegramBot<SceneContext> {
   const bot = new TelegramBot<SceneContext>(new NodeApiClient(record.token));
 
+  // Отправляет сообщение с кнопками и гарантирует, что кнопки останутся
+  // только на САМОМ СВЕЖЕМ сообщении с этой стороны чата — предыдущее
+  // сообщение с кнопками (если было) визуально очищается. Это защищает
+  // от случайного клика по устаревшей кнопке где-то в истории переписки
+  // (особенно важно для «Забанить» — иначе можно случайно повторно
+  // забанить уже разбаненного клиента, кликнув по старому сообщению).
+  async function sendTracked<T extends { message_id: number }>(
+    chatId: string,
+    side: 'master' | 'client',
+    recipientId: number,
+    send: () => Promise<T>
+  ): Promise<T> {
+    const column = side === 'master' ? 'last_master_button_msg_id' : 'last_client_button_msg_id';
+
+    const { data: prev } = await db.from('active_chats').select(column).eq('id', chatId).maybeSingle();
+    const prevMsgId = (prev as Record<string, unknown> | null)?.[column] as number | null | undefined;
+
+    if (prevMsgId) {
+      try {
+        await bot.editMessageReplyMarkup(
+          { chat_id: recipientId, message_id: prevMsgId },
+          { reply_markup: { inline_keyboard: [] } }
+        );
+      } catch {
+        // Сообщение могли удалить или оно устарело для редактирования (>48ч) — не критично
+      }
+    }
+
+    const sent = await send();
+
+    await db.from('active_chats').update({ [column]: sent.message_id }).eq('id', chatId);
+
+    return sent;
+  }
+
   bot.catch((err, ctx) => {
     console.error(`[${record.city_name}] Ошибка:`, err);
   });
@@ -321,20 +356,37 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     }
 
     const chatId = (chat as Record<string, unknown>).id as string;
-    const endKeyboard = endChatKeyboard(chatId);
     const masterKeyboardWithBan = masterActionsKeyboard(chatId);
 
+    // Убираем кнопку «Написать мастеру» с карточки, по которой кликнул клиент —
+    // иначе он может вернуться назад и нажать её повторно
+    const cardMsg = ctx.callbackQuery!.message;
+    if (cardMsg) {
+      try {
+        await bot.editMessageReplyMarkup(
+          { chat_id: cardMsg.chat.id, message_id: cardMsg.message_id },
+          { reply_markup: { inline_keyboard: [] } }
+        );
+      } catch {
+        // не критично
+      }
+    }
+
     // Уведомляем клиента
-    await ctx.reply(
-      `💬 Чат с мастером *${masterName}* открыт!\n\nПишите ваш вопрос:`,
-      { parse_mode: 'Markdown', reply_markup: endKeyboard.toJSON() }
+    await sendTracked(chatId, 'client', clientId, () =>
+      ctx.reply(
+        `💬 Чат с мастером *${masterName}* открыт!\n\nПишите ваш вопрос:`,
+        { parse_mode: 'Markdown', reply_markup: endChatKeyboard(chatId).toJSON() }
+      )
     );
 
     // Уведомляем мастера и сохраняем message_id для маппинга Reply
-    const notifMsg = await bot.sendMessage(
-      masterId,
-      `💬 Новый клиент хочет с вами пообщаться!\n\nОтвечайте Reply на сообщения клиента чтобы он вас видел.`,
-      { reply_markup: masterKeyboardWithBan.toJSON() }
+    const notifMsg = await sendTracked(chatId, 'master', masterId, () =>
+      bot.sendMessage(
+        masterId,
+        `💬 Новый клиент хочет с вами пообщаться!\n\nОтвечайте Reply на сообщения клиента чтобы он вас видел.`,
+        { reply_markup: masterKeyboardWithBan.toJSON() }
+      )
     );
 
     await db.from('chat_messages').insert({
@@ -399,6 +451,19 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     // Только реальный участник чата может его завершить
     if (userId !== raw.client_id && userId !== raw.master_id) {
       return;
+    }
+
+    // Убираем кнопки Да/Отмена с самого сообщения-подтверждения
+    const confirmMsg = ctx.callbackQuery!.message;
+    if (confirmMsg) {
+      try {
+        await bot.editMessageReplyMarkup(
+          { chat_id: confirmMsg.chat.id, message_id: confirmMsg.message_id },
+          { reply_markup: { inline_keyboard: [] } }
+        );
+      } catch {
+        // не критично
+      }
     }
 
     await db
@@ -503,6 +568,19 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     // Банить может только сам мастер этого чата
     if (userId !== masterId) {
       return;
+    }
+
+    // Убираем кнопки Да/Отмена с самого сообщения-подтверждения
+    const confirmMsg = ctx.callbackQuery!.message;
+    if (confirmMsg) {
+      try {
+        await bot.editMessageReplyMarkup(
+          { chat_id: confirmMsg.chat.id, message_id: confirmMsg.message_id },
+          { reply_markup: { inline_keyboard: [] } }
+        );
+      } catch {
+        // не критично
+      }
     }
 
     // Если чат ещё активен — заодно завершаем его
@@ -697,25 +775,29 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
       const clientName = fromMsg?.first_name ?? 'Клиент';
 
       if (photoFileId) {
-        const sentMsg = await bot.sendPhoto(
-          raw.master_id as number,
-          photoFileId,
-          {
-            caption: `📸 *${clientName}*`,
-            parse_mode: 'Markdown',
-            reply_markup: masterActionsKeyboard(raw.id as string).toJSON()
-          }
+        const sentMsg = await sendTracked(raw.id as string, 'master', raw.master_id as number, () =>
+          bot.sendPhoto(
+            raw.master_id as number,
+            photoFileId,
+            {
+              caption: `📸 *${clientName}*`,
+              parse_mode: 'Markdown',
+              reply_markup: masterActionsKeyboard(raw.id as string).toJSON()
+            }
+          )
         );
         await db.from('chat_messages').insert({ chat_id: raw.id, message_id: sentMsg.message_id });
         await db.from('chat_message_log').insert({ chat_id: raw.id, sender_id: userId, photo_ids: [photoFileId] });
       } else if (text) {
-        const sentMsg = await bot.sendMessage(
-          raw.master_id as number,
-          `💬 *${clientName}:* ${text}`,
-          {
-            parse_mode: 'Markdown',
-            reply_markup: masterActionsKeyboard(raw.id as string).toJSON()
-          }
+        const sentMsg = await sendTracked(raw.id as string, 'master', raw.master_id as number, () =>
+          bot.sendMessage(
+            raw.master_id as number,
+            `💬 *${clientName}:* ${text}`,
+            {
+              parse_mode: 'Markdown',
+              reply_markup: masterActionsKeyboard(raw.id as string).toJSON()
+            }
+          )
         );
         await db.from('chat_messages').insert({ chat_id: raw.id, message_id: sentMsg.message_id });
         await db.from('chat_message_log').insert({ chat_id: raw.id, sender_id: userId, text });
@@ -755,24 +837,28 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
         const masterName = (masterProfile as { name: string } | null)?.name ?? 'Мастер';
 
         if (photoFileId) {
-          await bot.sendPhoto(
-            targetChat.client_id as number,
-            photoFileId,
-            {
-              caption: `📸 *${masterName}*`,
-              parse_mode: 'Markdown',
-              reply_markup: endChatKeyboard(targetChat.id as string).toJSON()
-            }
+          await sendTracked(targetChat.id as string, 'client', targetChat.client_id as number, () =>
+            bot.sendPhoto(
+              targetChat.client_id as number,
+              photoFileId,
+              {
+                caption: `📸 *${masterName}*`,
+                parse_mode: 'Markdown',
+                reply_markup: endChatKeyboard(targetChat.id as string).toJSON()
+              }
+            )
           );
           await db.from('chat_message_log').insert({ chat_id: targetChat.id, sender_id: userId, photo_ids: [photoFileId] });
         } else if (text) {
-          await bot.sendMessage(
-            targetChat.client_id as number,
-            `💼 *${masterName}:* ${text}`,
-            {
-              parse_mode: 'Markdown',
-              reply_markup: endChatKeyboard(targetChat.id as string).toJSON()
-            }
+          await sendTracked(targetChat.id as string, 'client', targetChat.client_id as number, () =>
+            bot.sendMessage(
+              targetChat.client_id as number,
+              `💼 *${masterName}:* ${text}`,
+              {
+                parse_mode: 'Markdown',
+                reply_markup: endChatKeyboard(targetChat.id as string).toJSON()
+              }
+            )
           );
           await db.from('chat_message_log').insert({ chat_id: targetChat.id, sender_id: userId, text });
         }
@@ -824,13 +910,15 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
 
         const masterName = (masterProfile as { name: string } | null)?.name ?? 'Мастер';
 
-        await bot.sendMessage(
-          found.client_id as number,
-          `💼 *${masterName}:* ${text}`,
-          {
-            parse_mode: 'Markdown',
-            reply_markup: endChatKeyboard(found.id as string).toJSON()
-          }
+        await sendTracked(found.id as string, 'client', found.client_id as number, () =>
+          bot.sendMessage(
+            found.client_id as number,
+            `💼 *${masterName}:* ${text}`,
+            {
+              parse_mode: 'Markdown',
+              reply_markup: endChatKeyboard(found.id as string).toJSON()
+            }
+          )
         );
         await db.from('chat_message_log').insert({ chat_id: found.id, sender_id: userId, text });
         await db.from('active_chats').update({ updated_at: new Date().toISOString() }).eq('id', found.id);
