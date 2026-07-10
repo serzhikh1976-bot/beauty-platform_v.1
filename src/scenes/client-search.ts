@@ -114,6 +114,24 @@ function buildKeyboard(items: { id: number; name: string }[], prefix: string): I
   return kb;
 }
 
+// Убирает кнопки с сообщения предыдущего шага визарда — иначе клиент может
+// вернуться в историю и нажать на уже пройденный шаг (например, старую
+// кнопку выбора услуги после того как уже выбрал район), и это собьёт
+// состояние сцены. История не должна влиять на настоящее.
+async function clearButtons(ctx: SceneContext): Promise<void> {
+  const msg = ctx.callbackQuery?.message;
+  if (!msg) return;
+  try {
+    await ctx.api.editMessageReplyMarkup({
+      chat_id: msg.chat.id,
+      message_id: msg.message_id,
+      reply_markup: { inline_keyboard: [] }
+    });
+  } catch {
+    // сообщение удалено или устарело для редактирования — не критично
+  }
+}
+
 export function createClientSearchScene(botId: number) {
   return new WizardScene<SceneContext>(
     'client_search',
@@ -135,6 +153,7 @@ export function createClientSearchScene(botId: number) {
       ctx.scene.state.service_name = svcName;
 
       await ctx.answerCallbackQuery();
+      await clearButtons(ctx);
 
       const districts = await getDistrictsWithMasters(botId, serviceId);
       if (districts.length === 0) {
@@ -160,6 +179,7 @@ export function createClientSearchScene(botId: number) {
         const districtId = parseInt(data.replace('search_district:', ''));
         ctx.scene.state.district_id = districtId;
         await ctx.answerCallbackQuery();
+        await clearButtons(ctx);
 
         // Находим название района из списка
         const districts = await getDistrictsWithMasters(botId, serviceId);
@@ -187,6 +207,7 @@ export function createClientSearchScene(botId: number) {
         const districtName = ctx.scene.state.district_name as string ?? '';
         const serviceName = ctx.scene.state.service_name as string ?? '';
         await ctx.answerCallbackQuery();
+        await clearButtons(ctx);
 
         await showMasters(ctx, botId, serviceId, districtId, subDistrictId, serviceName, districtName);
       }

@@ -73,7 +73,23 @@ const masterActionsKeyboard = (chatId: string) =>
 function createBot(record: BotRecord): TelegramBot<SceneContext> {
   const bot = new TelegramBot<SceneContext>(new NodeApiClient(record.token));
 
-  // Отправляет сообщение с кнопками и гарантирует, что кнопки останутся
+  // Убирает inline-кнопки с сообщения, на кнопку которого только что кликнули.
+  // Для одноразовых действий (выбор роли, подтверждения) — чтобы нельзя было
+  // случайно повторно нажать на уже отработавшую кнопку в истории чата.
+  async function clearButtons(ctx: SceneContext): Promise<void> {
+    const msg = ctx.callbackQuery?.message;
+    if (!msg) return;
+    try {
+      await bot.editMessageReplyMarkup(
+        { chat_id: msg.chat.id, message_id: msg.message_id },
+        { reply_markup: { inline_keyboard: [] } }
+      );
+    } catch {
+      // сообщение удалено или устарело для редактирования — не критично
+    }
+  }
+
+
   // только на САМОМ СВЕЖЕМ сообщении с этой стороны чата — предыдущее
   // сообщение с кнопками (если было) визуально очищается. Это защищает
   // от случайного клика по устаревшей кнопке где-то в истории переписки
@@ -185,6 +201,7 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     const userId = ctx.callbackQuery!.from.id;
     await saveRole(record.id, userId, 'client');
     await ctx.answerCallbackQuery();
+    await clearButtons(ctx);
 
     const clientKeyboard = new ReplyKeyboard()
       .text('🔍 Найти мастера')
@@ -200,12 +217,49 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     const userId = ctx.callbackQuery!.from.id;
     await saveRole(record.id, userId, 'master');
     await ctx.answerCallbackQuery();
+    await clearButtons(ctx);
     await ctx.reply('Как вас зовут? Введите ваше имя:');
     ctx.scene.enter('master_registration');
   });
 
   // Поиск мастеров (кнопка и команда)
   const startSearch = async (ctx: SceneContext) => {
+    const userId = ctx.from?.id;
+
+    // Если уже есть открытый чат — сразу говорим об этом, не гоняя клиента
+    // через весь визард поиска чтобы упереться в этот же экран в конце
+    if (userId) {
+      const { data: existing, error: existingError } = await db
+        .from('active_chats')
+        .select('master_id')
+        .eq('client_id', userId)
+        .eq('bot_id', record.id)
+        .eq('status', 'active')
+        .maybeSingle();
+
+      if (existingError) {
+        console.error(`[${record.city_name}] Ошибка проверки активного чата:`, existingError.message);
+      }
+
+      if (existing) {
+        const masterId = (existing as { master_id: number }).master_id;
+
+        const { data: masterProfile } = await db
+          .from('masters_profiles')
+          .select('name')
+          .eq('master_id', masterId)
+          .eq('bot_id', record.id)
+          .maybeSingle();
+
+        const masterName = (masterProfile as { name: string } | null)?.name ?? 'мастером';
+
+        return ctx.reply(
+          `У вас уже открыт чат с *${masterName}*.\n\nСначала завершите его, потом сможете найти другого мастера.`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+    }
+
     const services = await getServicesWithMasters(record.id);
 
     if (services.length === 0) {
@@ -233,6 +287,7 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
   bot.action(/^master_card:/, async (ctx) => {
     const masterId = parseInt((ctx.callbackQuery!.data ?? '').replace('master_card:', ''));
     await ctx.answerCallbackQuery();
+    await clearButtons(ctx);
 
     const { data } = await db
       .from('masters_profiles')
@@ -297,17 +352,29 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     await ctx.answerCallbackQuery();
 
     // Проверяем есть ли уже активный чат у клиента
-    const { data: existing } = await db
+    const { data: existing, error: existingError } = await db
       .from('active_chats')
-      .select('id, master_id, masters_profiles(name)')
+      .select('id, master_id')
       .eq('client_id', clientId)
       .eq('bot_id', record.id)
       .eq('status', 'active')
       .maybeSingle();
 
+    if (existingError) {
+      console.error(`[${record.city_name}] Ошибка проверки активного чата:`, existingError.message);
+    }
+
     if (existing) {
-      const raw = existing as Record<string, unknown>;
-      const masterName = (raw.masters_profiles as { name: string } | null)?.name ?? 'мастером';
+      const existingMasterId = (existing as { master_id: number }).master_id;
+
+      const { data: existingMasterProfile } = await db
+        .from('masters_profiles')
+        .select('name')
+        .eq('master_id', existingMasterId)
+        .eq('bot_id', record.id)
+        .maybeSingle();
+
+      const masterName = (existingMasterProfile as { name: string } | null)?.name ?? 'мастером';
       return ctx.reply(`У вас уже есть активный чат с *${masterName}*. Сначала завершите его.`, { parse_mode: 'Markdown' });
     }
 
@@ -360,17 +427,7 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
 
     // Убираем кнопку «Написать мастеру» с карточки, по которой кликнул клиент —
     // иначе он может вернуться назад и нажать её повторно
-    const cardMsg = ctx.callbackQuery!.message;
-    if (cardMsg) {
-      try {
-        await bot.editMessageReplyMarkup(
-          { chat_id: cardMsg.chat.id, message_id: cardMsg.message_id },
-          { reply_markup: { inline_keyboard: [] } }
-        );
-      } catch {
-        // не критично
-      }
-    }
+    await clearButtons(ctx);
 
     // Уведомляем клиента
     await sendTracked(chatId, 'client', clientId, () =>
@@ -454,17 +511,7 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     }
 
     // Убираем кнопки Да/Отмена с самого сообщения-подтверждения
-    const confirmMsg = ctx.callbackQuery!.message;
-    if (confirmMsg) {
-      try {
-        await bot.editMessageReplyMarkup(
-          { chat_id: confirmMsg.chat.id, message_id: confirmMsg.message_id },
-          { reply_markup: { inline_keyboard: [] } }
-        );
-      } catch {
-        // не критично
-      }
-    }
+    await clearButtons(ctx);
 
     await db
       .from('active_chats')
@@ -571,17 +618,7 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     }
 
     // Убираем кнопки Да/Отмена с самого сообщения-подтверждения
-    const confirmMsg = ctx.callbackQuery!.message;
-    if (confirmMsg) {
-      try {
-        await bot.editMessageReplyMarkup(
-          { chat_id: confirmMsg.chat.id, message_id: confirmMsg.message_id },
-          { reply_markup: { inline_keyboard: [] } }
-        );
-      } catch {
-        // не критично
-      }
-    }
+    await clearButtons(ctx);
 
     // Если чат ещё активен — заодно завершаем его
     if (raw.status === 'active') {
