@@ -5,6 +5,7 @@ import {
   Context
 } from 'ultra-telegram-framework';
 import { db } from './db.js';
+import { escapeHtml } from './telegram-html.js';
 
 // ── Singleton ────────────────────────────────────────────────────────────
 // В отличие от city-ботов (bot-manager.ts), этот бот не в таблице `bots` —
@@ -124,7 +125,7 @@ async function sendDashboard(ctx: Context): Promise<void> {
   const activeCities = cities.filter((c) => c.is_active).length;
 
   const text =
-    `🛠 *Панель суперадмина*\n\n` +
+    `🛠 <b>Панель суперадмина</b>\n\n` +
     `🏙 Городов: ${cities.length} (активно: ${activeCities})\n` +
     `💼 Мастеров всего: ${masters.length} (активно: ${masters.filter((m) => m.is_active).length})\n` +
     `💬 Открытых чатов: ${chats.length}\n\n` +
@@ -145,7 +146,7 @@ async function sendDashboard(ctx: Context): Promise<void> {
   }
   keyboard.text('💬 Все активные чаты', 'admin_chats');
 
-  await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard.toJSON() });
+  await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.toJSON() });
 }
 
 // ── Детали по одному городу ─────────────────────────────────────────────
@@ -177,21 +178,21 @@ async function sendCityDetails(ctx: Context, botId: number): Promise<void> {
   const chatCount = ((chatsRaw as unknown[]) ?? []).length;
 
   let text =
-    `${city.is_active ? '🟢' : '🔴'} *${city.city_name}*\n` +
+    `${city.is_active ? '🟢' : '🔴'} <b>${escapeHtml(city.city_name)}</b>\n` +
     `💬 Открытых чатов: ${chatCount}\n\n` +
-    `*Мастера (${masters.length}):*\n`;
+    `<b>Мастера (${masters.length}):</b>\n`;
 
   if (masters.length === 0) {
     text += '—\n';
   } else {
     for (const m of masters) {
-      text += `${m.is_active ? '✅' : '⏸'} ${m.name} · от ${m.price_from} грн\n`;
+      text += `${m.is_active ? '✅' : '⏸'} ${escapeHtml(m.name)} · от ${m.price_from} грн\n`;
     }
   }
 
   const keyboard = new InlineKeyboard().text('⬅️ Назад', 'admin_dashboard');
 
-  await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard.toJSON() });
+  await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.toJSON() });
 }
 
 // ── Все активные чаты по всем городам ───────────────────────────────────
@@ -212,14 +213,14 @@ async function sendActiveChats(ctx: Context): Promise<void> {
     return;
   }
 
-  let text = `💬 *Активные чаты (${chats.length}):*\n\n`;
+  let text = `💬 <b>Активные чаты (${chats.length}):</b>\n\n`;
   for (const chat of chats) {
     const cityName = (chat.bots as { city_name: string } | null)?.city_name ?? '—';
     const updatedAt = new Date(chat.updated_at as string);
     const minutesAgo = Math.max(0, Math.round((Date.now() - updatedAt.getTime()) / 60000));
 
-    text += `🏙 ${cityName} · клиент \`${chat.client_id}\` ↔ мастер \`${chat.master_id}\` · ${minutesAgo} мин назад\n`;
+    text += `🏙 ${escapeHtml(cityName)} · клиент <code>${chat.client_id}</code> ↔ мастер <code>${chat.master_id}</code> · ${minutesAgo} мин назад\n`;
   }
 
-  await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard.toJSON() });
+  await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.toJSON() });
 }

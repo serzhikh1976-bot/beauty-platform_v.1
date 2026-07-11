@@ -1,6 +1,7 @@
 import { WizardScene, InlineKeyboard } from 'ultra-telegram-framework';
 import type { SceneContext } from 'ultra-telegram-framework';
 import { db } from '../db.js';
+import { escapeHtml } from '../telegram-html.js';
 
 interface Service { id: number; name: string; }
 interface District { id: number; name: string; }
@@ -264,8 +265,8 @@ async function showMasters(
   }
 
   await ctx.reply(
-    `📋 *${serviceName}* · *${locationName}* · ${masters.length} мастеров\n\nВыберите мастера:`,
-    { parse_mode: 'Markdown', reply_markup: keyboard.toJSON() }
+    `📋 <b>${escapeHtml(serviceName)}</b> · <b>${escapeHtml(locationName)}</b> · ${masters.length} мастеров\n\nВыберите мастера:`,
+    { parse_mode: 'HTML', reply_markup: keyboard.toJSON() }
   );
 
   ctx.scene.leave();

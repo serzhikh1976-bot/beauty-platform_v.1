@@ -8,6 +8,7 @@ import {
 } from 'ultra-telegram-framework';
 import type { SceneContext } from 'ultra-telegram-framework';
 import { db, type BotRecord } from './db.js';
+import { escapeHtml } from './telegram-html.js';
 import { createMasterRegistrationScene } from './scenes/master-registration.js';
 import { createEditPriceScene } from './scenes/edit-price.js';
 import { createEditDistrictScene } from './scenes/edit-district.js';
@@ -254,8 +255,8 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
         const masterName = (masterProfile as { name: string } | null)?.name ?? 'мастером';
 
         return ctx.reply(
-          `У вас уже открыт чат с *${masterName}*.\n\nСначала завершите его, потом сможете найти другого мастера.`,
-          { parse_mode: 'Markdown' }
+          `У вас уже открыт чат с <b>${escapeHtml(masterName)}</b>.\n\nСначала завершите его, потом сможете найти другого мастера.`,
+          { parse_mode: 'HTML' }
         );
       }
     }
@@ -316,9 +317,9 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
       .join(', ') || '—';
 
     const text =
-      `👤 *${raw.name}*\n` +
-      `💼 ${services}\n` +
-      `📍 ${location}\n` +
+      `👤 <b>${escapeHtml(raw.name as string)}</b>\n` +
+      `💼 ${escapeHtml(services)}\n` +
+      `📍 ${escapeHtml(location)}\n` +
       `💰 от ${raw.price_from} грн`;
 
     const keyboard = new InlineKeyboard()
@@ -331,13 +332,13 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
         photos.map((fileId: string, i: number) => ({
           type: 'photo' as const,
           media: fileId,
-          ...(i === 0 ? { caption: text, parse_mode: 'Markdown' as const } : {})
+          ...(i === 0 ? { caption: text, parse_mode: 'HTML' as const } : {})
         }))
       );
       await ctx.reply('👆 Контакт мастера:', { reply_markup: keyboard.toJSON() });
     } else {
       await ctx.reply(text, {
-        parse_mode: 'Markdown',
+        parse_mode: 'HTML',
         reply_markup: keyboard.toJSON()
       });
     }
@@ -375,7 +376,7 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
         .maybeSingle();
 
       const masterName = (existingMasterProfile as { name: string } | null)?.name ?? 'мастером';
-      return ctx.reply(`У вас уже есть активный чат с *${masterName}*. Сначала завершите его.`, { parse_mode: 'Markdown' });
+      return ctx.reply(`У вас уже есть активный чат с <b>${escapeHtml(masterName)}</b>. Сначала завершите его.`, { parse_mode: 'HTML' });
     }
 
     // Проверяем что мастер активен
@@ -432,8 +433,8 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     // Уведомляем клиента
     await sendTracked(chatId, 'client', clientId, () =>
       ctx.reply(
-        `💬 Чат с мастером *${masterName}* открыт!\n\nПишите ваш вопрос:`,
-        { parse_mode: 'Markdown', reply_markup: endChatKeyboard(chatId).toJSON() }
+        `💬 Чат с мастером <b>${escapeHtml(masterName)}</b> открыт!\n\nПишите ваш вопрос:`,
+        { parse_mode: 'HTML', reply_markup: endChatKeyboard(chatId).toJSON() }
       )
     );
 
@@ -545,17 +546,17 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
     // Уведомляем обоих, каждому — с именем собеседника
     await ctx.reply(
       userId === clientId
-        ? `✅ Диалог с *${masterName}* завершён.`
-        : `✅ Диалог с *${clientName}* завершён.`,
-      { parse_mode: 'Markdown' }
+        ? `✅ Диалог с <b>${escapeHtml(masterName)}</b> завершён.`
+        : `✅ Диалог с <b>${escapeHtml(clientName)}</b> завершён.`,
+      { parse_mode: 'HTML' }
     );
 
     const otherId = userId === clientId ? masterId : clientId;
     const otherMsg = userId === clientId
-      ? `✅ Диалог с *${clientName}* завершён.`
-      : `✅ Диалог с *${masterName}* завершён.`;
+      ? `✅ Диалог с <b>${escapeHtml(clientName)}</b> завершён.`
+      : `✅ Диалог с <b>${escapeHtml(masterName)}</b> завершён.`;
 
-    await bot.sendMessage(otherId, otherMsg, { parse_mode: 'Markdown' });
+    await bot.sendMessage(otherId, otherMsg, { parse_mode: 'HTML' });
   });
 
   // Бан клиента мастером
@@ -817,8 +818,8 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
             raw.master_id as number,
             photoFileId,
             {
-              caption: `📸 *${clientName}*`,
-              parse_mode: 'Markdown',
+              caption: `📸 <b>${escapeHtml(clientName)}</b>`,
+              parse_mode: 'HTML',
               reply_markup: masterActionsKeyboard(raw.id as string).toJSON()
             }
           )
@@ -829,9 +830,9 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
         const sentMsg = await sendTracked(raw.id as string, 'master', raw.master_id as number, () =>
           bot.sendMessage(
             raw.master_id as number,
-            `💬 *${clientName}:* ${text}`,
+            `💬 <b>${escapeHtml(clientName)}:</b> ${escapeHtml(text)}`,
             {
-              parse_mode: 'Markdown',
+              parse_mode: 'HTML',
               reply_markup: masterActionsKeyboard(raw.id as string).toJSON()
             }
           )
@@ -879,8 +880,8 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
               targetChat.client_id as number,
               photoFileId,
               {
-                caption: `📸 *${masterName}*`,
-                parse_mode: 'Markdown',
+                caption: `📸 <b>${escapeHtml(masterName)}</b>`,
+                parse_mode: 'HTML',
                 reply_markup: endChatKeyboard(targetChat.id as string).toJSON()
               }
             )
@@ -890,9 +891,9 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
           await sendTracked(targetChat.id as string, 'client', targetChat.client_id as number, () =>
             bot.sendMessage(
               targetChat.client_id as number,
-              `💼 *${masterName}:* ${text}`,
+              `💼 <b>${escapeHtml(masterName)}:</b> ${escapeHtml(text)}`,
               {
-                parse_mode: 'Markdown',
+                parse_mode: 'HTML',
                 reply_markup: endChatKeyboard(targetChat.id as string).toJSON()
               }
             )
@@ -959,9 +960,9 @@ function createBot(record: BotRecord): TelegramBot<SceneContext> {
         await sendTracked(found.id as string, 'client', found.client_id as number, () =>
           bot.sendMessage(
             found.client_id as number,
-            `💼 *${masterName}:* ${text}`,
+            `💼 <b>${escapeHtml(masterName)}:</b> ${escapeHtml(text)}`,
             {
-              parse_mode: 'Markdown',
+              parse_mode: 'HTML',
               reply_markup: endChatKeyboard(found.id as string).toJSON()
             }
           )
@@ -1076,9 +1077,9 @@ async function showMasterProfile(
   const status = raw.is_active ? '✅ Активен' : '⏸ На паузе';
 
   const text =
-    `👤 *${raw.name}*\n` +
-    `💼 ${services}\n` +
-    `📍 ${location || '—'}\n` +
+    `👤 <b>${escapeHtml(raw.name as string)}</b>\n` +
+    `💼 ${escapeHtml(services)}\n` +
+    `📍 ${escapeHtml(location || '—')}\n` +
     `💰 от ${raw.price_from} грн\n` +
     `${status}`;
 
@@ -1100,14 +1101,14 @@ async function showMasterProfile(
         type: 'photo' as const,
         media: fileId,
         // Подпись только на первом фото
-        ...(i === 0 ? { caption: text, parse_mode: 'Markdown' as const } : {})
+        ...(i === 0 ? { caption: text, parse_mode: 'HTML' as const } : {})
       }))
     );
     // Кнопка отдельным сообщением (к медиагруппе нельзя прикрепить кнопки)
     await ctx.reply('Управление профилем:', { reply_markup: keyboard.toJSON() });
   } else {
     await ctx.reply(text, {
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
       reply_markup: keyboard.toJSON()
     });
   }
