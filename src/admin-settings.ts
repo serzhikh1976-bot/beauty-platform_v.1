@@ -244,18 +244,23 @@ async function handleServiceToggle(request: FastifyRequest, reply: FastifyReply)
   const cityId = Number(body.city_id);
   const enable = body.enable === '1';
 
-  const { data: existing } = await db
+  const { data: existing, error: checkError } = await db
     .from('bot_services')
-    .select('id')
+    .select('is_enabled')
     .eq('bot_id', cityId)
     .eq('service_id', serviceId)
     .maybeSingle();
+
+  if (checkError) {
+    console.error('[AdminSettings] Ошибка проверки bot_services:', checkError.message);
+  }
 
   if (existing) {
     const { error } = await db
       .from('bot_services')
       .update({ is_enabled: enable })
-      .eq('id', (existing as { id: number }).id);
+      .eq('bot_id', cityId)
+      .eq('service_id', serviceId);
     if (error) console.error('[AdminSettings] Ошибка обновления bot_services:', error.message);
   } else {
     const { error } = await db.from('bot_services').insert({ bot_id: cityId, service_id: serviceId, is_enabled: enable });
